@@ -1,7 +1,7 @@
 from network import *
 from utils import *
 import keras.backend as K
-
+import time
 
 
 def network_search():
@@ -26,24 +26,27 @@ def network_search():
         for bottle in possible_bottle:
             for reg_param in possible_reg_param:
                 for scale in scales:
-                    print("%.4f percent done"%(count/total*100))
-                    count+=1
-                    K.clear_session()
-                    reg_model, sup_model = ResnetBuilder.build((224,224,1),
-                        scale = scale,
-                        reg_params = compile_params,
-                        sup_params = compile_params,
-                        rep=rep,
-                        bottle=bottle,
-                        reg_param=reg_param)
-                    reg_hist = reg_model.fit_generator(train_generator,epochs=1,callbacks=None,
-                        validation_data=val_generator)
-                    if sum(reg_hist.history['val_loss'])/len(reg_hist.history['val_loss']) < best:
-                        best = sum(reg_hist.history['val_loss'])/len(reg_hist.history['val_loss']) 
-                        best_rep = rep
-                        best_bottle=bottle
-                        best_reg_param=reg_param
-                        best_scale = scale
+                    try:
+                        count+=1
+                        K.clear_session()
+                        reg_model, sup_model = ResnetBuilder.build((224,224,1),
+                            scale = scale,
+                            reg_params = compile_params,
+                            sup_params = compile_params,
+                            rep=rep,
+                            bottle=bottle,
+                            reg_param=reg_param)
+                        reg_hist = reg_model.fit_generator(train_generator,epochs=1,callbacks=None,
+                            validation_data=val_generator)
+                        if sum(reg_hist.history['val_loss'])/len(reg_hist.history['val_loss']) < best:
+                            best = sum(reg_hist.history['val_loss'])/len(reg_hist.history['val_loss']) 
+                            best_rep = rep
+                            best_bottle=bottle
+                            best_reg_param=reg_param
+                            best_scale = scale
+                    except:
+                        print("Combination causes error, continuing")
+                        continue
     print("The following achieved the best validation loss in 4 epochs: \n",
             "rep: ", best_rep,
             "\nbottle: ", best_bottle,
@@ -74,7 +77,6 @@ def optimizer_search(model_params):
                 for amsgrad in possible_amsgrad:
                     count+=1
                     K.clear_session()
-                    print("%.4f percent done."%(count/total*100))
                     compile_params=(custom_mae_metric,lr,b1,b2,None,0.0,amsgrad)
                     reg_model, sup_model = ResnetBuilder.build((224,224,1),
                             scale=model_params['scale'],
@@ -83,9 +85,9 @@ def optimizer_search(model_params):
                             rep=model_params['rep'],
                             bottle=model_params['bottle'],
                             reg_param=model_params['reg'])
-                    reg_hist = reg_model.fit_generator(train_generator,epochs=4,callbacks=None,
+                    reg_hist = reg_model.fit_generator(train_generator,epochs=1,callbacks=None,
                             validation_data=val_generator)
-                    if reg_hist.history['val_loss'][-1] < best:
+                    if sum(reg_hist.history['val_loss'])/len(reg_hist.history['val_loss']) < best:
                         best = reg_hist.history['val_loss'][-1]
                         best_lr = lr
                         best_b1 = b1
@@ -101,7 +103,7 @@ def optimizer_search(model_params):
 
 def train_search(params):
     train_generator = RSNAGenerator(batch_size=32,dim=(224,224),train=True,shuffle=True)
-    val_generator = RSNAGenerator(batch_size=32,dim=(224,224),train=True,shuffle=True)
+    val_generator = RSNAGenerator(batch_size=32,dim=(224,224),train=False,shuffle=True)
 
     batch_sizes = [2,4,8,16,32,64,128]
     dims = [(224,224,1),(260,260,1),(384,384,1)]
@@ -112,30 +114,36 @@ def train_search(params):
     best_dim = None
     count = 0
     total = len(batch_sizes)*len(dims)
-
     for bs in batch_sizes:
         for dim in dims:
-            print("%.4f percent done."%(count/total*100))
-            count+=1
-            K.clear_session()
-            train_generator.batch_size=bs
-            val_generator.batch_size=bs
-            train_generator.dim = dim[:2]
-            val_generator.dim = dim[:2]
-            reg_model, sup_model = ResnetBuilder.build(
-                    dim,
-                    scale=model_params['scale'],
-                    reg_params=compile_params,
-                    sup_params=compile_params,
-                    rep = params['rep'],
-                    bottle=params['bottle'],
-                    reg_param=params['reg'])
-            reg_hist = reg_model.fit_generator(train_generator,epochs=4,callbacks=None,
-                    validation_data=val_generator)
-            if reg_hist.history['val_loss'][-1] < best:
-                best = reg_hist.history['val_loss'][-1]
-                best_bs = bs
-                best_dim = dim
+            try:
+                print(dim,bs) 
+                start = time.time()
+                count+=1
+                K.clear_session()
+                train_generator.batch_size=bs
+                val_generator.batch_size=bs
+                train_generator.dim = dim[:2]
+                val_generator.dim = dim[:2]
+                reg_model, sup_model = ResnetBuilder.build(
+                        dim,
+                        scale=params['scale'],
+                        reg_params=compile_params,
+                        sup_params=compile_params,
+                        rep = params['rep'],
+                        bottle=params['bottle'],
+                        reg_param=params['reg'])
+                reg_hist = reg_model.fit_generator(train_generator,epochs=1,callbacks=None,
+                        validation_data=val_generator)
+                if sum(reg_hist.history['val_loss'])/len(reg_hist.history['val_loss']) < best:
+                    best = reg_hist.history['val_loss'][-1]
+                    best_bs = bs
+                    best_dim = dim
+            except:
+                print(dim,bs)
+                print(params)
+                print("Caused errors.")
+                continue
     print("The following are the best values for the train: \n",
             "batch size: ",best_bs,
             "\ndims: ",best_dim)
@@ -143,9 +151,15 @@ def train_search(params):
 
 
 def search():
-    params = network_search()
+#    params = network_search()
+    params = {'scale': 2, 'rep': [1, 3, 2], 'reg': 0.01, 'bottle': True} 
+    print(params)
 #    params = optimizer_search(params)
-#    params = train_search(params)
+    params.update({"lr":  0.001,"b1":  0.89,"b2":  0.934,"amsgrad":  False})
+
+    print(params)
+    params = train_search(params)
+    print(params)
     return params
 
 

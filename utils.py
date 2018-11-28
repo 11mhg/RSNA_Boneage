@@ -10,6 +10,8 @@ import imgaug as ia
 from imgaug import augmenters as iaa
 import keras
 import cv2
+import time
+from multiprocessing import Pool
 
 def get_dataframe():
     data_dir = './rsna-bone-age/'
@@ -33,11 +35,22 @@ def get_dataframe():
                                 stratify=data['boneage_category'])
     return train_df, val_df, bone_age_div
 
+def worker_unpack(args):
+    return open_images_worker(*args)
+
+def open_images_worker(imgname,dim=(384,384),train=True):
+    if train:
+        return augment_image(open_image(imgname,dim))
+    else:
+        return open_image(imgname,dim)
 
 def open_image(filepath,dim=(384,384)):
     image = Image.open(filepath)
-    image = image.resize(dim,resample=Image.BILINEAR)
-    return np.array(image)
+    image = resize(np.array(image),dim)
+    return image
+
+def resize_unpack(args):
+    return resize(*args)
 
 def resize(image,size):
     return cv2.resize(image,size)
@@ -113,6 +126,13 @@ class RSNAGenerator(keras.utils.Sequence):
     def __getitem__(self,index):
         ind = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
         cur_labels, cur_images = [self.labels[k] for k in ind], [self.images[k] for k in ind]
+        if cur_images[0].shape[:2] != self.dim:
+            p = Pool(processes=20)
+            args = []
+            for i in range(len(self.images)):
+                args.append((self.images[i],self.dim))
+            self.images = p.map(resize_unpack,args)
+            p.terminate()
         cur_images = [resize(img,self.dim) if img.shape[:2] != self.dim else img for img in cur_images]
         X = np.empty((self.batch_size, *self.dim,1),dtype=np.float32)
         Y = np.empty((self.batch_size),dtype=np.float32)
@@ -123,14 +143,17 @@ class RSNAGenerator(keras.utils.Sequence):
 
     def prep(self):
         self.images=[]
-        pbar = tqdm(range(len(self.labels)))
-        pbar.set_description("Loading dataset into memory for quick training")
-        for ind in pbar:
-            if self.train:
-                self.images.append(augment_image(open_image(self.img_paths[ind],self.dim)))
-            else:
-                self.images.append(open_image(self.img_paths[ind],self.dim))
-    
+        print("Loading dataset into memory for faster training")
+        p = Pool(processes=20)
+        start = time.time()
+        filenames = self.img_paths
+        args = []
+        for i in range(len(filenames)):
+            args.append((filenames[i],self.dim,self.train))
+        self.images = p.map(worker_unpack,args)
+        p.terminate()
+        print("Done prepping")
+         
     def on_epoch_end(self):
         global bone_age_div
         train_df, val_df, bone_age_div = get_dataframe()
