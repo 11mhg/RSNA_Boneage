@@ -3,3 +3,4 @@ logs/*
 rsna-bone-age/
 model_weights/*
 *.hdf5
+*.h5
