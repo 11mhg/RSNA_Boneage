@@ -2,9 +2,9 @@ import numpy as np
 import tensorflow as tf
 import keras
 from keras.models import Model
-from keras.layers import Input, Activation, Dense, Flatten, Dropout
-from keras.layers.convolutional import Conv2D, MaxPooling2D, AveragePooling2D
-from keras.layers.merge import add
+from keras.layers import Input, Activation, Dense, Flatten, Dropout, Concatenate
+from keras.layers.convolutional import Conv2D, MaxPooling2D, AveragePooling2D 
+from keras.layers.merge import add, Multiply
 from keras.layers.normalization import BatchNormalization
 from keras.regularizers import l2
 from keras.callbacks import EarlyStopping, ReduceLROnPlateau
@@ -14,6 +14,8 @@ from keras.metrics import mean_absolute_error
 from sklearn import metrics
 from subpixel import SubpixelConv2D
 from utils import custom_mae_metric
+from tensorflow.python.client import device_lib
+from keras.utils.training_utils import multi_gpu_model
 from keras.callbacks import *
 """
 This code is inspired from the keras resnet implementation
@@ -23,6 +25,12 @@ It has been modified to allow for easy parameter searching and compilation/train
 """
 
 regularizer_param = 1.e-4
+
+def get_available_gpus():
+    local_device_protos = device_lib.list_local_devices()
+    return [x.name for x in local_device_protos if x.device_type =='GPU']
+
+
 
 def _bn_relu(inp):
     norm = BatchNormalization(axis=-1)(inp)
@@ -122,7 +130,7 @@ def bottleneck(filters, init_strides=(1,1), is_first_layer=False):
 
 class ResnetBuilder(object):
     @staticmethod
-    def build_regressor(inp, m1_out, repetitions, bottle=False, filt_start = 64, kernel_1 = (7,7), stride_start = (2,2),reg_param=1.e-4):
+    def _build_regressor(inp, m1_out, repetitions, bottle=False, filt_start = 64, kernel_1 = (7,7), stride_start = (2,2),reg_param=1.e-4):
         '''
         Builds a custom resnet like architecture
         '''
@@ -138,58 +146,138 @@ class ResnetBuilder(object):
         block = pool1
         filters = filt_start 
         for i, r in enumerate(repetitions):
-            if i >= len(repetitions):
-                with tf.device('/gpu:1'):
-                    block = _res_block(block_fn,filters=filters, repetitions=r, is_first_layer=i==0)(block)
-            else:
-                with tf.device('/gpu:0'):
-                    block = _res_block(block_fn,filters=filters, repetitions=r, is_first_layer=i==0)(block)
+            #if i >= len(repetitions):
+            #    with tf.device('/gpu:1'):
+            #        block = _res_block(block_fn,filters=filters, repetitions=r, is_first_layer=i==0)(block)
+            #else:
+            #    with tf.device('/gpu:0'):
+            block = _res_block(block_fn,filters=filters, repetitions=r, is_first_layer=i==0)(block)
             filters*=2
-        with tf.device('/gpu:1'):
-            block = _bn_relu(block)
+        #with tf.device('/gpu:1'):
+        block = _bn_relu(block)
 
-            #classifier_block
-            block_shape = K.int_shape(block)[1:]
-            pool2 = AveragePooling2D(pool_size=(block_shape[0],block_shape[1]),strides=(1,1))(block)
+        #classifier_block
+        block_shape = K.int_shape(block)[1:]
+        pool2 = AveragePooling2D(pool_size=(block_shape[0],block_shape[1]),strides=(1,1))(block)
             
-            flatten1= Flatten()(pool2)
-            dense1 = Dense(units=1024, kernel_initializer="he_normal",
-                          activation='elu')(flatten1)
-            dense1 = Dropout(0.25)(dense1)
-            dense2 = Dense(units=1, kernel_initializer="he_normal",
-                          activation='linear')(dense1)
+        flatten1= Flatten()(pool2)
+        dense1 = Dense(units=1024, kernel_initializer="he_normal",
+            activation='tanh')(flatten1)
+        dense1 = Dropout(0.25)(dense1)
+        dense2 = Dense(units=1, kernel_initializer="he_normal",
+            activation='linear')(dense1)
 
         model = Model(inputs=inp, outputs=dense2)
-        return dense2 
+        return model
+    
+    def _build_resnet50(inp):
+        inp_conc = Concatenate()([inp,inp,inp])
+        m = keras.applications.ResNet50(include_top = False,weights='imagenet',input_shape=inp_conc.get_shape().as_list()[1:],pooling=None)
+        m.trainable = False
+        m_out = m(inp_conc)
+        attn_layer1 = Conv2D(2048,kernel_size=[1,1],activation='softmax')(m_out)
+        attn_layer2 = Conv2D(2048,kernel_size=[1,1],activation='linear',use_bias=False)(attn_layer1)
+        attn_layer3 = Multiply()([m_out,attn_layer2])
+        fcl = Dense(256,activation='linear')(attn_layer3)
+        out = Dense(1,activation='linear')(fcl)
+        return Model(inputs=inp,outputs=out)
+
+
+    @staticmethod
+    def build_sup(input_shape,reg_model,sup_params,scale):
+        max_filt = scale ** 2
+        gpus = get_available_gpus()
+        G = len(gpus)
+
+        if G <=1:
+            print("One gpu found, training as normal")
+            inp = Input(shape=input_shape)
+            conv1 = _conv_bn_relu(filters=32,kernel_size=(3,3),strides=(1,1))(inp)
+            conv2 = _conv_bn_relu(filters=64,kernel_size=(3,3),strides=(1,1))(conv1)
+            conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
+            sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
+            for layer in reg_model.layers:
+                layer.trainable=False
+            reg_model.layers.pop(0)
+            new_out = reg_model(sub)
+            sup_model = Model(inputs=inp,outputs=new_out)
+        else:
+            print("Training with {} GPUS...".format(G))
+            
+            with tf.device("/cpu:0"):
+                inp = Input(shape=input_shape)
+                conv1 = _conv_bn_relu(filters=32, kernel_size=(3,3), strides=(1,1))(inp)
+                conv2 = _conv_bn_relu(filters=64, kernel_size=(3,3), strides=(1,1))(conv1)
+                conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
+                sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
+                for layer in reg_model.layers:
+                    layer.trainable=False
+                reg_model.layers.pop(0)
+                new_out = reg_model(sub)
+                sup_model=Model(inputs=inp,outputs=new_out)
+            sup_model = multi_gpu_model(sup_model,gpus=G)
+        sup_model = ResnetBuilder.compile(sup_model,*sup_params)
+        sup_model.summary()
+        return sup_model
+
 
     @staticmethod
     def build(input_shape,scale, reg_params, sup_params, rep, bottle=False,filt_start=64,kernel_1=(7,7),
-            stride_start=(2,2),reg_param=1.e-4):
+            stride_start=(2,2),reg_alph=1.e-4):
         max_filt = scale**2
         
-        inp = Input(shape=input_shape)
-        conv1 = _conv_bn_relu(filters=32, kernel_size=(3,3), strides=(1,1))(inp)
-        conv2 = _conv_bn_relu(filters=64, kernel_size=(3,3), strides=(1,1))(conv1)
-        conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
-        sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
+        gpus = get_available_gpus()
+
+        G = len(gpus)
+
+        if G <=1:
+            print("One gpu found, training as normal")
+            inp = Input(shape=input_shape)
+            conv1 = _conv_bn_relu(filters=32, kernel_size=(3,3), strides=(1,1))(inp)
+            conv2 = _conv_bn_relu(filters=64, kernel_size=(3,3), strides=(1,1))(conv1)
+            conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
+            sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
         
-        conv1.trainable=False
-        conv2.trainable=False
-        conv3.trainable=False
+            conv1.trainable=False
+            conv2.trainable=False
+            conv3.trainable=False
         
-        out = ResnetBuilder.build_regressor(inp,sub,rep,bottle,filt_start,kernel_1,stride_start,reg_param)
+            out = ResnetBuilder._build_regressor(inp,sub,rep,bottle,filt_start,kernel_1,stride_start,reg_alph)
         
-        reg_model = Model(inputs=inp,outputs=out)
+            reg_model = Model(inputs=inp,outputs=out)
+        else:
+            print("Training with {} GPUS...".format(G))
+            
+            with tf.device("/cpu:0"):
+                inp = Input(shape=input_shape)
+                conv1 = _conv_bn_relu(filters=32, kernel_size=(3,3), strides=(1,1))(inp)
+                conv2 = _conv_bn_relu(filters=64, kernel_size=(3,3), strides=(1,1))(conv1)
+                conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
+                sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
+            
+                conv1.trainable=False
+                conv2.trainable=False
+                conv3.trainable=False
+            
+                reg_model = ResnetBuilder._build_regressor(inp,sub,rep,bottle,filt_start,kernel_1,stride_start,reg_alph)
+            
+            reg_model = multi_gpu_model(reg_model,gpus=G)
+
         reg_model = ResnetBuilder.compile(reg_model,*reg_params)
 
 
         for layer in reg_model.layers:
-            layer.trianable=False
+            layer.trainable=False
         conv1.trainable=True
         conv2.trainable=True
         conv3.trainable=True
-
-        sup_model = Model(inputs=inp,outputs=out)
+        
+        if G <=1:
+            sup_model = Model(inputs=inp,outputs=reg_model.output)
+        else:
+            with tf.device("/cpu:0"):
+                sup_model = Model(inputs=inp,outputs=reg_model.output)
+            sup_model = multi_gpu_model(sup_model,gpus=G)
 
         sup_model = ResnetBuilder.compile(sup_model,*sup_params)        
 
@@ -207,10 +295,12 @@ class ResnetBuilder(object):
 
 
 def train_epoch(m1,m2, train_generator, val_generator, callbacks=None, epoch_steps = 1,epoch_num=0):
-    m1.fit_generator(train_generator,epochs=epoch_steps, callbacks=callbacks,validation_data=val_generator,
-            initial_epoch=epoch_num)
-    m2.fit_generator(train_generator,epochs=epoch_steps, callbacks=callbacks,validation_data=val_generator,
-            initial_epoch=epoch_num)
+    print("Training Reg model")
+    m1.fit_generator(train_generator,epochs=epoch_steps, callbacks=callbacks,
+            validation_data=val_generator.__getall__(),initial_epoch=epoch_num)
+    print("Training Super res model")
+    m2.fit_generator(train_generator,epochs=epoch_steps, callbacks=callbacks,
+            validation_data=val_generator.__getall__(),initial_epoch=epoch_num)
 
 def train(m1,m2,train_generator,val_generator, epoch_steps=1, epochs=10):
     weight_path = "bone_age_weights.best.hdf5"
@@ -220,8 +310,8 @@ def train(m1,m2,train_generator,val_generator, epoch_steps=1, epochs=10):
     early = EarlyStopping(monitor='val_loss',
                           mode='min',
                           patience=10)
-    tb = TensorBoard(log_dir='./logs',histogram_freq=0,batch_size=train_generator.batch_size,write_graph=True,
-            write_images=True,update_freq=500)
+    tb = TensorBoard(log_dir='./logs',histogram_freq=epoch_steps,batch_size=train_generator.batch_size,write_graph=True,
+            write_images=True)
     callbacks = [checkpoint,reduceLROnPlat,early,tb]
 
     for e in range(0,epochs,epoch_steps):
@@ -229,7 +319,33 @@ def train(m1,m2,train_generator,val_generator, epoch_steps=1, epochs=10):
 
     return m1, m2
 
+def train_sup(m1, train_generator, val_generator,epochs=10):
+    weight_path = "./model_weights/sup_bone_age_weights.best.hdf5"
+    checkpoint = ModelCheckpoint(weight_path,monitor='val_loss',verbose=1,
+            save_best_only=True,mode='min',save_weights_only=True)
+    reduceLROnPlat = ReduceLROnPlateau(monitor='val_loss',factor=0.8,patience=10,verbose=1,mode='auto',epsilon=0.0001, cooldown=5,min_lr=0.00001)
+    early = EarlyStopping(monitor='val_loss',
+                          mode='min',
+                          patience=10)
+    callbacks = [checkpoint,reduceLROnPlat,early]
 
+    m1.fit_generator(train_generator,epochs=epochs,validation_data=val_generator,callbacks=callbacks)
+    m1.save('sup_model.h5')
+    print("SubPixel network trained")
+    return m1
 
+def train_reg(m1, train_generator, val_generator,epochs=10):
+    weight_path = "./model_weights/reg_bone_age_weights.best.hdf5"
+    checkpoint = ModelCheckpoint(weight_path,monitor='val_loss',verbose=1,
+            save_best_only=True,mode='min',save_weights_only=True)
+    reduceLROnPlat = ReduceLROnPlateau(monitor='val_loss',factor=0.8,patience=10,verbose=1,mode='auto',epsilon=0.0001, cooldown=5,min_lr=0.00001)
+    early = EarlyStopping(monitor='val_loss',
+                          mode='min',
+                          patience=10)
+    callbacks = [checkpoint,reduceLROnPlat,early]
 
+    m1.fit_generator(train_generator,epochs=epochs,validation_data=val_generator,callbacks=callbacks)
 
+    m1.save('reg_model.h5')
+    print("Regularization network trained")
+    return m1

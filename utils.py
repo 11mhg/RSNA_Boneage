@@ -13,8 +13,8 @@ import cv2
 import time
 from multiprocessing import Pool
 
-def get_dataframe():
-    data_dir = './rsna-bone-age/'
+def get_dataframe(directory):
+    data_dir = directory + '/rsna-bone-age/'
     data = pd.read_csv(os.path.join(data_dir,'boneage-training-dataset.csv'))
     data['path'] = data['id'].map(lambda x: os.path.join(data_dir,'boneage-training-dataset',
         '{}.png'.format(x)))
@@ -112,11 +112,13 @@ def custom_mae_metric(y_true, y_pred):
 class RSNAGenerator(keras.utils.Sequence):
     'Data Generator for Keras'
 
-    def __init__(self,batch_size=32,dim=(384,384),train=True,shuffle=True):
+    def __init__(self,directory,batch_size=32,dim=(384,384),train=True,shuffle=True):
+        self.directory = directory
         self.dim = dim
         self.batch_size = batch_size
         self.shuffle = shuffle
         self.train = train
+        self.on_init()
         self.on_epoch_end()
         self.prep()
 
@@ -133,13 +135,18 @@ class RSNAGenerator(keras.utils.Sequence):
                 args.append((self.images[i],self.dim))
             self.images = p.map(resize_unpack,args)
             p.terminate()
-        cur_images = [resize(img,self.dim) if img.shape[:2] != self.dim else img for img in cur_images]
         X = np.empty((self.batch_size, *self.dim,1),dtype=np.float32)
         Y = np.empty((self.batch_size),dtype=np.float32)
         for i in range(self.batch_size):
             X[i,] = np.expand_dims(cur_images[i],-1)
             Y[i] = cur_labels[i]
         return X,Y
+    def __getall__(self):
+        cur_labels = np.array(self.labels,dtype=np.float32)
+        cur_images = np.array(self.images,dtype=np.float32)
+        cur_labels = np.expand_dims(cur_labels,-1)
+        cur_images = np.expand_dims(cur_images,-1)
+        return cur_images,cur_labels
 
     def prep(self):
         self.images=[]
@@ -154,14 +161,14 @@ class RSNAGenerator(keras.utils.Sequence):
         p.terminate()
         print("Done prepping")
          
-    def on_epoch_end(self):
+    def on_init(self):
         global bone_age_div
-        train_df, val_df, bone_age_div = get_dataframe()
+        train_df, val_df, bone_age_div = get_dataframe(self.directory)
         if self.train:
             self.labels, self.img_paths = get_data(train_df)
         else:
             self.labels, self.img_paths = get_data(val_df)
-        
+    def on_epoch_end(self):
         self.indexes = np.arange(len(self.labels))
         if self.shuffle:
             np.random.shuffle(self.indexes)

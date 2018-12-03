@@ -1,3 +1,5 @@
 *.jpg
 logs/*
 rsna-bone-age/
+model_weights/*
+*.hdf5
