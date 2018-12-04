@@ -162,7 +162,7 @@ def search(directory,ind):
 #    params = network_search(directory)
     params = {'scale': 2, 'rep': [1, 3, 2], 'reg': 0.01, 'bottle': True} 
 #    params = optimizer_search(params,directory)
-    params.update({"lr":  0.001,"b1":  0.89,"b2":  0.934,"amsgrad":  False})
+    params.update({"lr":  0.0001,"b1":  0.89,"b2":  0.934,"amsgrad":  False})
 
 #    params = train_search(params,directory,ind)
     params.update({"bs":16,"dim":(260,260,1)})

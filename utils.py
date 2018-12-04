@@ -58,7 +58,7 @@ def resize(image,size):
 def normalize(image):
     image = np.array(image,dtype=np.float32)
     if image.max() > 1.0:
-        image = np.interp(image,(image.min(),image.max()),(0.0,1.0))
+        image = image/255.0 
     image = np.array(image,dtype=np.float32)
     return image
 
@@ -69,15 +69,7 @@ def augment_image(image):
                 [
                     iaa.SomeOf((0,6),
                         [
-                            iaa.OneOf([
-                                iaa.GaussianBlur((0,3.0)),
-                                iaa.AverageBlur(k=(2,7)),
-                                iaa.MedianBlur(k=(3,11)),
-                            ]),
                         iaa.Sharpen(alpha=(0,1.0),lightness=(0.75,1.5)),
-                        iaa.AdditiveGaussianNoise(loc=0, scale=(0.0,0.05*255),per_channel=0.5),
-                        iaa.Dropout((0.01,0.075),per_channel=0.5),
-                        iaa.Add((-5,5),per_channel=0.5),
                         iaa.Fliplr(0.5),
                         iaa.Flipud(0.5),
                         iaa.Affine(rotate=(-90,90),
