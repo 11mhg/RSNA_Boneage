@@ -165,7 +165,7 @@ def search(directory,ind):
     params.update({"lr":  0.0001,"b1":  0.89,"b2":  0.934,"amsgrad":  False})
 
 #    params = train_search(params,directory,ind)
-    params.update({"bs":16,"dim":(260,260,1)})
+    params.update({"bs":2,"dim":(260,260,1)})
     print("The parameters found were: ",params)
     return params
 

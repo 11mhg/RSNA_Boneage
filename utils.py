@@ -29,11 +29,28 @@ def get_dataframe(directory):
 
     data['boneage_category'] = pd.cut(data['boneage'],10)
 
-    train_df, val_df = train_test_split(data,
-                                test_size = 0.25,
+    train_df, test_df = train_test_split(data,
+                                test_size = 0.15,
                                 random_state=7,
                                 stratify=data['boneage_category'])
-    return train_df, val_df, bone_age_div
+    train_df, val_df = train_test_split(train_df,test_size=0.25,
+                                random_state=7,
+                                stratify=train_df['boneage_category'])
+    return train_df, val_df, bone_age_div, bone_age_mean
+
+def get_test(directory):
+    data_dir = directory+'/rsna-bone-age/'
+    data = pd.read_csv(os.path.join(data_dir,'boneage-training-dataset.csv'))
+    data['path'] = data['id'].map(lambda x: os.path.join(data_dir, 'boneage-training-dataset','{}.png'.format(x)))
+    data['exists'] = data['path'].map(os.path.exists)
+    data['gender'] = data['male'].map(lambda x: 'male' if x else 'female')
+    data['female'] = data['male'].map(lambda x: False if x else True)
+    data['boneage_category'] = pd.cut(data['boneage'],10)
+    _, test_df = train_test_split(data,
+                test_size=0.15,
+                random_state=7,
+                stratify=data['boneage_category'])
+    return test_df
 
 def worker_unpack(args):
     return open_images_worker(*args)
@@ -88,11 +105,13 @@ def augment_image(image):
 def get_data(df):
     labels = []
     img_paths = []
+    genders = []
     pbar = tqdm(df.iterrows())
     for i, row in pbar:
         labels.append(row['bone_age_zscore'])
         img_paths.append(row['path'])
-    return labels, img_paths
+        genders.append(1.0 if row['female'] else 0.0)
+    return labels, img_paths, genders
 
 
 def custom_mae_metric(y_true, y_pred):
@@ -120,6 +139,7 @@ class RSNAGenerator(keras.utils.Sequence):
     def __getitem__(self,index):
         ind = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
         cur_labels, cur_images = [self.labels[k] for k in ind], [self.images[k] for k in ind]
+        cur_genders = [self.genders[k] for k in ind]
         if cur_images[0].shape[:2] != self.dim:
             p = Pool(processes=20)
             args = []
@@ -129,10 +149,13 @@ class RSNAGenerator(keras.utils.Sequence):
             p.terminate()
         X = np.empty((self.batch_size, *self.dim,1),dtype=np.float32)
         Y = np.empty((self.batch_size),dtype=np.float32)
+        gends = np.empty((self.batch_size,1),dtype=np.float32)
         for i in range(self.batch_size):
             X[i,] = np.expand_dims(cur_images[i],-1)
             Y[i] = cur_labels[i]
-        return X,Y
+            gends[i,0] = cur_genders[i]
+        return [X,gends],Y
+
     def __getall__(self):
         cur_labels = np.array(self.labels,dtype=np.float32)
         cur_images = np.array(self.images,dtype=np.float32)
@@ -155,11 +178,15 @@ class RSNAGenerator(keras.utils.Sequence):
          
     def on_init(self):
         global bone_age_div
-        train_df, val_df, bone_age_div = get_dataframe(self.directory)
+        self.bad = 0
+        train_df, val_df, bone_age_div, bone_age_mean = get_dataframe(self.directory)
         if self.train:
-            self.labels, self.img_paths = get_data(train_df)
+            self.labels, self.img_paths,self.genders = get_data(train_df)
         else:
-            self.labels, self.img_paths = get_data(val_df)
+            self.labels, self.img_paths,self.genders = get_data(val_df)
+        self.bad = bone_age_div
+        self.mean = bone_age_mean
+
     def on_epoch_end(self):
         self.indexes = np.arange(len(self.labels))
         if self.shuffle:

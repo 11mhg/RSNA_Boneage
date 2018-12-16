@@ -178,44 +178,54 @@ class ResnetBuilder(object):
         fcl = Dense(256,activation='linear')(flat)
         out = Dense(1,activation='linear')(fcl)
         return Model(inputs=inp,outputs=out)
-
+    
+    @staticmethod
+    def _build_full(inp,gender,network='resnet'):
+        max_filt = 2 **2
+        conv1 = _conv_bn_relu(filters=32,kernel_size=(3,3),strides=(1,1))(inp)
+        conv2 = _conv_bn_relu(filters=64,kernel_size=(3,3),strides=(1,1))(conv1)
+        conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
+        sub = SubpixelConv2D(input_shape=conv3.get_shape().as_list()[1:],scale=2)(conv3)
+        inp_resize = Lambda(lambda x: K.tf.image.resize_images(x,sub.get_shape().as_list()[1:3]))(inp)
+        inp_conc = concatenate([inp_resize,sub,sub])
+        if network == 'resnet':
+            m = keras.applications.ResNet50(include_top = False,weights='imagenet',input_shape=inp_conc.get_shape().as_list()[1:],pooling=None)
+        else:
+            m = keras.applications.VGG16(include_top=False,weights='imagenet',input_shape=inp_conc.get_shape().as_list()[1:])
+        m.trainable = False
+        m_out = m(inp_conc)
+        attn_layer1 = Conv2D(2048,kernel_size=[1,1],activation='sigmoid')(m_out)
+        attn_layer2 = Conv2D(m_out.get_shape().as_list()[-1],kernel_size=[1,1],activation='linear',use_bias=False)(attn_layer1)
+        attn_layer3 = Multiply()([m_out,attn_layer2])
+        attn_layer3 = Lambda(lambda x: x,name='attention')(attn_layer3)
+        flat = Flatten()(attn_layer3)
+        gender_out = Dense(32)(gender)
+        flat = concatenate([flat,gender_out])
+        fcl = Dense(512,activation='linear')(flat)
+        fcl = Dense(512,activation='linear')(fcl)
+        out = Dense(1,activation='linear')(fcl)
+        return Model(inputs=[inp,gender],outputs=out)
 
     @staticmethod
-    def build_sup(input_shape,reg_model,sup_params,scale,trainable=False):
-        max_filt = scale ** 2
-        gpus = get_available_gpus()
-        G = len(gpus)
-
-        if G <=1:
-            print("One gpu found, training as normal")
-            inp = Input(shape=input_shape)
-            conv1 = _conv_bn_relu(filters=32,kernel_size=(3,3),strides=(1,1))(inp)
-            conv2 = _conv_bn_relu(filters=64,kernel_size=(3,3),strides=(1,1))(conv1)
-            conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
-            sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
-            for layer in reg_model.layers:
-                layer.trainable=trainable
-            reg_model.layers.pop(0)
-            new_out = reg_model(sub)
-            sup_model = Model(inputs=inp,outputs=new_out)
+    def _build_full_nosr(inp,gender,network='resnet'):
+        inp_conc = concatenate([inp,inp,inp])
+        if network=='resnet':
+            m = keras.applications.ResNet50(include_top = False,weights='imagenet',input_shape=inp_conc.get_shape().as_list()[1:],pooling=None)
         else:
-            print("Training with {} GPUS...".format(G))
-            
-            with tf.device("/cpu:0"):
-                inp = Input(shape=input_shape)
-                conv1 = _conv_bn_relu(filters=32, kernel_size=(3,3), strides=(1,1))(inp)
-                conv2 = _conv_bn_relu(filters=64, kernel_size=(3,3), strides=(1,1))(conv1)
-                conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
-                sub = SubpixelConv2D(input_shape=input_shape,scale=scale)(conv3)
-                for layer in reg_model.layers:
-                    layer.trainable=trainable
-                reg_model.layers.pop(0)
-                new_out = reg_model(sub)
-                sup_model=Model(inputs=inp,outputs=new_out)
-            sup_model = multi_gpu_model(sup_model,gpus=G)
-        sup_model = ResnetBuilder.compile(sup_model,*sup_params)
-        sup_model.summary()
-        return sup_model
+            m = keras.applications.VGG16(include_top=False,weights='imagenet',input_shape=inp_conc.get_shape().as_list()[1:])
+        m.trainable = False
+        m_out = m(inp_conc)
+        attn_layer1 = Conv2D(2048,kernel_size=[1,1],activation='sigmoid')(m_out)
+        attn_layer2 = Conv2D(m_out.get_shape().as_list()[-1],kernel_size=[1,1],activation='linear',use_bias=False)(attn_layer1)
+        attn_layer3 = Multiply()([m_out,attn_layer2])
+        attn_layer3 = Lambda(lambda x: x,name='attention')(attn_layer3)
+        flat = Flatten()(attn_layer3)
+        gender_out = Dense(32)(gender)
+        flat = concatenate([flat,gender_out])
+        fcl = Dense(512,activation='linear')(flat)
+        fcl = Dense(512,activation='linear')(fcl)
+        out = Dense(1,activation='linear')(fcl)
+        return Model(inputs=[inp,gender],outputs=out)
 
     @staticmethod
     def compile(model,metric,lr=0.001,b1=0.9,b2=0.999,min_delta=None,decay=0.0,amsgrad=False):
@@ -226,34 +236,8 @@ class ResnetBuilder(object):
         return model
     
 
-def train_sup(m1, train_generator, val_generator,epochs=10):
-    weight_path = "./model_weights/sup_bone_age_weights.best.hdf5"
-    checkpoint = ModelCheckpoint(weight_path,monitor='val_loss',verbose=1,
-            save_best_only=True,mode='min',save_weights_only=True)
-    reduceLROnPlat = ReduceLROnPlateau(monitor='val_loss',factor=0.8,patience=10,verbose=1,mode='auto',min_delta=0.0001, cooldown=5,min_lr=0.00001)
-    early = EarlyStopping(monitor='val_loss',
-                          mode='min',
-                          patience=10)
-    tb = TensorBoard(log_dir='./logs/sup',histogram_freq=epochs,batch_size=train_generator.batch_size,
-            write_graph=True,write_images=False)
-    callbacks = [checkpoint,reduceLROnPlat,early]
-
-    H = m1.fit_generator(train_generator,epochs=epochs,validation_data=val_generator,callbacks=callbacks)
-
-    history = H.history
-    for key in history.keys():
-        plt.plot(history[key])
-        plt.title(str(key))
-        plt.xlabel('epoch')
-        plt.savefig('./plots/'+str(key)+'-plot.png')
-        plt.close()
-
-    m1.save('sup_model.h5')
-    print("SubPixel network trained")
-    return m1
-
-def train_reg(m1, train_generator, val_generator,epochs=10):
-    weight_path = "./model_weights/reg_bone_age_weights.best.hdf5"
+def train_reg(m1, train_generator, val_generator,epochs=10,sr=True,network='resnet'):
+    weight_path = "./model_weights/reg_{}_bone_age_weights.best.hdf5".format(network) if sr else "./model_weights/reg_nosr_{}_weights.best.hdf5".format(network)
     checkpoint = ModelCheckpoint(weight_path,monitor='val_loss',verbose=1,
             save_best_only=True,mode='min',save_weights_only=True)
     reduceLROnPlat = ReduceLROnPlateau(monitor='val_loss',factor=0.8,patience=10,verbose=1,mode='auto',min_delta=0.0001, cooldown=5,min_lr=0.00001)
@@ -272,8 +256,11 @@ def train_reg(m1, train_generator, val_generator,epochs=10):
         plt.plot(history[key])
         plt.title(str(key))
         plt.xlabel('epoch')
-        plt.savefig('./plots/'+str(key)+'-plot.png')
+        plt.savefig('./plots/'+str(key)+'{}-{}-plot.png'.format(network,str(sr)))
         plt.close()
-    m1.save('reg_model.h5')
+    if sr:
+        m1.save('reg_{}_model.h5'.format(network))
+    else:
+        m1.save('reg_{}_nosr_model.h5'.format(network))
     print("Regularization network trained")
     return m1

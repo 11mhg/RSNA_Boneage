@@ -24,14 +24,14 @@ if __name__ == '__main__':
 
     compile_params = (custom_mae_metric,params['lr'],params['b1'],params['b2'],None,0.0,params['amsgrad'])
 
-#    inp = Input(scaled_dim)
-#    reg_model = ResnetBuilder._build_resnet50(inp)
+    inp = Input(scaled_dim)
+    reg_model = ResnetBuilder._build_resnet50(inp)
 
-#    reg_model = ResnetBuilder.compile(reg_model,*compile_params)
-#    reg_model.summary()
-#    if os.path.exists('./model_weights/reg_bone_age_weights.best.hdf5'):
-#        reg_model.load_weights('./model_weights/reg_bone_age_weights.best.hdf5')
-    #reg_model = train_reg(reg_model,train_generator,val_generator,epochs=int(args['epochs']))
+    reg_model = ResnetBuilder.compile(reg_model,*compile_params)
+    reg_model.summary()
+    #if os.path.exists('./model_weights/reg_bone_age_weights.best.hdf5'):
+    #    reg_model.load_weights('./model_weights/reg_bone_age_weights.best.hdf5')
+    reg_model = train_reg(reg_model,train_generator,val_generator,epochs=int(args['epochs']))
 
     train_generator.dim = params['dim'][:2]
     val_generator.dim = params['dim'][:2]
