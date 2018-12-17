@@ -8,6 +8,12 @@ import os, sys
 def get_params():
     return search('',0)
 
+'''
+This script allows you to specify the directory,
+number of epochs and the network to use in order to train
+a network without the super resolution layers.
+'''
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument("-td","--dir",required=True,

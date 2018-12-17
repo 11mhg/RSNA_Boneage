@@ -157,7 +157,10 @@ def train_search(params,directory,ind):
         f.write('id: {}\nloss: {}\nbs: {}\ndim: {}'.format(ind,best,best_bs,best_dim))
     return params.update({"bs":best_bs,"dim":best_dim})
 
+'''
+These values were got from running the above
 
+'''
 def search(directory,ind):
 #    params = network_search(directory)
     params = {'scale': 2, 'rep': [1, 3, 2], 'reg': 0.01, 'bottle': True} 

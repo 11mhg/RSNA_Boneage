@@ -31,7 +31,9 @@ def get_available_gpus():
     local_device_protos = device_lib.list_local_devices()
     return [x.name for x in local_device_protos if x.device_type =='GPU']
 
-
+'''
+The following are helper functions for creating a resnet like network. 
+'''
 
 def _bn_relu(inp):
     norm = BatchNormalization(axis=-1)(inp)
@@ -130,6 +132,8 @@ def bottleneck(filters, init_strides=(1,1), is_first_layer=False):
 
 
 class ResnetBuilder(object):
+    #The original method used to build a resnet like network
+    #No longer used as it is more benificial to use a network that has been pretrained
     @staticmethod
     def _build_regressor(inp, m1_out, repetitions, bottle=False, filt_start = 64, kernel_1 = (7,7), stride_start = (2,2),reg_param=1.e-4):
         '''
@@ -179,6 +183,8 @@ class ResnetBuilder(object):
         out = Dense(1,activation='linear')(fcl)
         return Model(inputs=inp,outputs=out)
     
+#Builds the full network with super resolution layers
+#based on the network input
     @staticmethod
     def _build_full(inp,gender,network='resnet'):
         max_filt = 2 **2
@@ -186,7 +192,10 @@ class ResnetBuilder(object):
         conv2 = _conv_bn_relu(filters=64,kernel_size=(3,3),strides=(1,1))(conv1)
         conv3 = _conv_bn_relu(filters=max_filt,kernel_size=(3,3),strides=(1,1))(conv2)
         sub = SubpixelConv2D(input_shape=conv3.get_shape().as_list()[1:],scale=2)(conv3)
+        #Give the network one channel with the resized input image as well as a concatenated super resolution layer
         inp_resize = Lambda(lambda x: K.tf.image.resize_images(x,sub.get_shape().as_list()[1:3]))(inp)
+        #We need three channels for the networks (as they are originally trained for color)
+        #so we concatenate the input resize and the subpixel layers output
         inp_conc = concatenate([inp_resize,sub,sub])
         if network == 'resnet':
             m = keras.applications.ResNet50(include_top = False,weights='imagenet',input_shape=inp_conc.get_shape().as_list()[1:],pooling=None)
@@ -206,6 +215,9 @@ class ResnetBuilder(object):
         out = Dense(1,activation='linear')(fcl)
         return Model(inputs=[inp,gender],outputs=out)
 
+
+#Builds the full network with no super resolution layers 
+#based on the network input
     @staticmethod
     def _build_full_nosr(inp,gender,network='resnet'):
         inp_conc = concatenate([inp,inp,inp])
@@ -227,6 +239,7 @@ class ResnetBuilder(object):
         out = Dense(1,activation='linear')(fcl)
         return Model(inputs=[inp,gender],outputs=out)
 
+#Compile the model using a particular custom metric and params for adam
     @staticmethod
     def compile(model,metric,lr=0.001,b1=0.9,b2=0.999,min_delta=None,decay=0.0,amsgrad=False):
         optimizer = keras.optimizers.Adam(lr,b1,b2,min_delta,decay,amsgrad)
@@ -235,7 +248,7 @@ class ResnetBuilder(object):
         
         return model
     
-
+#Trains the regressor using the training generator, val generator and saves at the appropriate locations
 def train_reg(m1, train_generator, val_generator,epochs=10,sr=True,network='resnet'):
     weight_path = "./model_weights/reg_{}_bone_age_weights.best.hdf5".format(network) if sr else "./model_weights/reg_nosr_{}_weights.best.hdf5".format(network)
     checkpoint = ModelCheckpoint(weight_path,monitor='val_loss',verbose=1,
@@ -244,13 +257,12 @@ def train_reg(m1, train_generator, val_generator,epochs=10,sr=True,network='resn
     early = EarlyStopping(monitor='val_loss',
                           mode='min',
                           patience=10)
-#    tb = TensorBoard(log_dir='./logs',histogram_freq=epochs,batch_size=train_generator.batch_size,
-#            write_graph=True,write_images=False)
 
     callbacks = [checkpoint,reduceLROnPlat,early]
 
     H = m1.fit_generator(train_generator,epochs=epochs,validation_data=val_generator,callbacks=callbacks)
-
+    
+    #Great way to get plots from the training 
     history = H.history
     for key in history.keys():
         plt.plot(history[key])

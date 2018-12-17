@@ -8,6 +8,11 @@ import os, sys
 def get_params():
     return search('',0)
 
+'''
+This python script allows you to specify a directory, the number of epochs
+and the network to use in order to train a super resolution network for regression
+'''
+
 if __name__ == '__main__':
     ap = argparse.ArgumentParser()
     ap.add_argument("-td","--dir",required=True,

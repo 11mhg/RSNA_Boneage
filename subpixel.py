@@ -3,6 +3,13 @@ import numpy as np
 import matplotlib.pyplot as plt
 from keras.layers import Lambda
 
+'''
+Phase Shift and subpixel convolution
+implementation found in https://github.com/tetrachrome/subpixel
+Modified slightly for use with possible color inputs or for quick implementation of the possible sub conv layers
+'''
+
+
 def _phaseshift(x,r=2):
     bsize, a, b, c = x.get_shape().as_list()
     bsize = tf.shape(x)[0]

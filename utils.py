@@ -13,6 +13,13 @@ import cv2
 import time
 from multiprocessing import Pool
 
+'''
+Functions and class for utility
+Includes image opening, dataframe retrieval,
+image augmentation, normalization and custom mae metric
+'''
+
+#Retrieves the train, val dataframes and the bone age div and bone age mean from the dataset
 def get_dataframe(directory):
     data_dir = directory + '/rsna-bone-age/'
     data = pd.read_csv(os.path.join(data_dir,'boneage-training-dataset.csv'))
@@ -38,6 +45,8 @@ def get_dataframe(directory):
                                 stratify=train_df['boneage_category'])
     return train_df, val_df, bone_age_div, bone_age_mean
 
+#Retrieves only the test set 
+#So long as random state is the same, this test set is the same as the above test set
 def get_test(directory):
     data_dir = directory+'/rsna-bone-age/'
     data = pd.read_csv(os.path.join(data_dir,'boneage-training-dataset.csv'))
@@ -52,26 +61,32 @@ def get_test(directory):
                 stratify=data['boneage_category'])
     return test_df
 
+#A wrapper function to allow for argument unpacking
 def worker_unpack(args):
     return open_images_worker(*args)
 
+#A wrapper function for use with threads
 def open_images_worker(imgname,dim=(384,384),train=True):
     if train:
         return augment_image(open_image(imgname,dim))
     else:
         return open_image(imgname,dim)
 
+#Opens an image and resizes if need be
 def open_image(filepath,dim=(384,384)):
     image = Image.open(filepath)
     image = resize(np.array(image),dim)
     return image
 
+#Helper function for resizing
 def resize_unpack(args):
     return resize(*args)
 
+#Resize function using cv2
 def resize(image,size):
     return cv2.resize(image,size)
 
+#Normalization of image
 def normalize(image):
     image = np.array(image,dtype=np.float32)
     if image.max() > 1.0:
@@ -79,6 +94,9 @@ def normalize(image):
     image = np.array(image,dtype=np.float32)
     return image
 
+#Augments image and if it has already been called once
+#it will save the augment pipe so that it can quickly reaugment based on the same
+#pipe
 def augment_image(image):
     if not hasattr(augment_image,'pipe'):
         sometimes = lambda aug: iaa.Sometimes(0.5,aug)
@@ -102,6 +120,7 @@ def augment_image(image):
     image = normalize(image)
     return image
 
+#Retrieves the labels, paths and genders for a particular dataframe
 def get_data(df):
     labels = []
     img_paths = []
@@ -113,13 +132,13 @@ def get_data(df):
         genders.append(1.0 if row['female'] else 0.0)
     return labels, img_paths, genders
 
-
+#custom metric for mean average error (requires the global bone_age_div in order to perform the mae calculation)
 def custom_mae_metric(y_true, y_pred):
     global bone_age_div 
     return keras.metrics.mean_absolute_error(bone_age_div*y_true,bone_age_div*y_pred)
 
 
-
+#This class is a data genereator for keras
 class RSNAGenerator(keras.utils.Sequence):
     'Data Generator for Keras'
 
@@ -133,9 +152,11 @@ class RSNAGenerator(keras.utils.Sequence):
         self.on_epoch_end()
         self.prep()
 
+#Returns the length of the dataset
     def __len__(self):
         return int(np.floor(len(self.indexes) / self.batch_size))
 
+#Returns a single batch at specified index
     def __getitem__(self,index):
         ind = self.indexes[index*self.batch_size:(index+1)*self.batch_size]
         cur_labels, cur_images = [self.labels[k] for k in ind], [self.images[k] for k in ind]
@@ -156,6 +177,7 @@ class RSNAGenerator(keras.utils.Sequence):
             gends[i,0] = cur_genders[i]
         return [X,gends],Y
 
+#Returns all elements in the dataset
     def __getall__(self):
         cur_labels = np.array(self.labels,dtype=np.float32)
         cur_images = np.array(self.images,dtype=np.float32)
@@ -163,6 +185,7 @@ class RSNAGenerator(keras.utils.Sequence):
         cur_images = np.expand_dims(cur_images,-1)
         return cur_images,cur_labels
 
+#Preps the generator by loading images into memory and augmenting them if need be
     def prep(self):
         self.images=[]
         print("Loading dataset into memory for faster training")
@@ -175,7 +198,8 @@ class RSNAGenerator(keras.utils.Sequence):
         self.images = p.map(worker_unpack,args)
         p.terminate()
         print("Done prepping")
-         
+
+#Initialize dataframe and retrieve appropriate values
     def on_init(self):
         global bone_age_div
         self.bad = 0
@@ -187,6 +211,7 @@ class RSNAGenerator(keras.utils.Sequence):
         self.bad = bone_age_div
         self.mean = bone_age_mean
 
+#When the epeoch ends, we reshuffle indices
     def on_epoch_end(self):
         self.indexes = np.arange(len(self.labels))
         if self.shuffle:
